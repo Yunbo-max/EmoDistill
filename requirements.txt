@@ -1,0 +1,35 @@
+# Core ML / training
+torch==2.9.0
+transformers==4.46.2
+peft==0.13.1
+trl==0.11.2
+accelerate==1.11.0
+datasets==4.3.0
+
+# Scientific
+numpy==1.26.4
+pandas==2.3.3
+scikit-learn==1.7.2
+scipy>=1.7.0
+
+# LLM clients (creditor/debtor + observer)
+langchain>=0.1.0
+langchain-core>=0.1.0
+langchain-openai>=0.1.0
+langchain-anthropic>=0.1.0
+langchain_google_genai>=0.1.0
+langchain-deepseek-official
+langgraph>=0.1.0
+openai==2.20.0
+dashscope
+
+# Utilities
+python-dotenv==1.1.1
+tqdm==4.67.1
+
+# Plotting (optional, analysis only)
+matplotlib>=3.5.0
+seaborn>=0.11.0
+
+# Optional: 8-bit quantization for LoRA on <=16GB GPUs
+# bitsandbytes
