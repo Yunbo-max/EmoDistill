@@ -1,24 +1,30 @@
 """
-DashScope (Aliyun) LLM wrapper with round-robin key rotation.
+OpenAI-compatible LLM wrapper supporting both DashScope (Aliyun) and OpenAI.
 
-DashScope exposes an OpenAI-compatible endpoint, so we can reuse the openai
-SDK. Multiple API keys are rotated round-robin across requests to spread load
-and stay under per-key QPS limits.
+Pick the provider at runtime by setting `LLM_PROVIDER`:
 
-Drop-in compatible with the LLMWrapper interface used elsewhere in the codebase:
+    LLM_PROVIDER=dashscope   (default)  →  Qwen-Plus etc. via DashScope endpoint
+    LLM_PROVIDER=openai                 →  gpt-4o-mini etc. via OpenAI endpoint
+
+Both backends expose the same OpenAI ChatCompletions API, so this wrapper just
+swaps base URL + key source. Multiple keys are rotated round-robin to spread
+load and stay under per-key rate limits.
+
+Drop-in compatible with the LLMWrapper interface used elsewhere:
     wrapper.invoke([HumanMessage(content=...)], temperature=...)
 returns an object with a `.content` attribute.
 
-Usage:
-    from EmoDistill.dashscope_wrapper import DashScopeWrapper
-    llm = DashScopeWrapper(model="qwen-plus", role="creditor")
-    resp = llm.invoke([HumanMessage(content="Hi")])
-    print(resp.content)
-
 Environment:
-    DASHSCOPE_API_KEYS       — comma-separated list of keys (preferred)
+    LLM_PROVIDER             — "dashscope" (default) or "openai"
+    # DashScope
+    DASHSCOPE_API_KEYS       — comma-separated list (preferred)
     DASHSCOPE_API_KEY        — single key fallback
-    DASHSCOPE_DEFAULT_MODEL  — default model name when not specified
+    DASHSCOPE_DEFAULT_MODEL  — default model when not specified (default: qwen-plus)
+    # OpenAI
+    OPENAI_API_KEYS          — comma-separated list (preferred)
+    OPENAI_API_KEY           — single key fallback
+    OPENAI_DEFAULT_MODEL     — default model when not specified (default: gpt-4o-mini)
+    OPENAI_BASE_URL          — override (defaults to https://api.openai.com/v1)
 """
 
 import os
@@ -28,16 +34,37 @@ from typing import List, Optional
 from openai import OpenAI
 
 DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+OPENAI_BASE_URL_DEFAULT = "https://api.openai.com/v1"
 
 
-def _load_keys() -> List[str]:
-    """Load API keys from env (multi or single)."""
-    multi = os.environ.get("DASHSCOPE_API_KEYS", "").strip()
+def _provider() -> str:
+    return os.environ.get("LLM_PROVIDER", "dashscope").strip().lower() or "dashscope"
+
+
+def _provider_base_url(provider: str) -> str:
+    if provider == "openai":
+        return os.environ.get("OPENAI_BASE_URL", OPENAI_BASE_URL_DEFAULT).strip()
+    return DASHSCOPE_BASE_URL
+
+
+def _provider_default_model(provider: str) -> str:
+    if provider == "openai":
+        return os.environ.get("OPENAI_DEFAULT_MODEL", "gpt-4o-mini")
+    return os.environ.get("DASHSCOPE_DEFAULT_MODEL", "qwen-plus")
+
+
+def _load_keys(provider: str) -> List[str]:
+    """Load API keys from env (multi or single) for the active provider."""
+    if provider == "openai":
+        multi = os.environ.get("OPENAI_API_KEYS", "").strip()
+        single = os.environ.get("OPENAI_API_KEY", "").strip()
+    else:
+        multi = os.environ.get("DASHSCOPE_API_KEYS", "").strip()
+        single = os.environ.get("DASHSCOPE_API_KEY", "").strip()
     if multi:
         keys = [k.strip() for k in multi.split(",") if k.strip()]
         if keys:
             return keys
-    single = os.environ.get("DASHSCOPE_API_KEY", "").strip()
     if single:
         return [single]
     return []
@@ -48,7 +75,7 @@ class _KeyRotator:
 
     def __init__(self, keys: List[str]):
         if not keys:
-            raise ValueError("No DashScope API keys available")
+            raise ValueError("No API keys available")
         self.keys = list(keys)
         self._idx = 0
         self._lock = threading.Lock()
@@ -63,20 +90,21 @@ class _KeyRotator:
         return len(self.keys)
 
 
-# Process-wide rotator so all wrappers share the same round-robin state.
-_GLOBAL_ROTATOR: Optional[_KeyRotator] = None
+# Provider-specific process-wide rotators
+_ROTATORS: dict = {}
 
 
-def get_rotator() -> _KeyRotator:
-    global _GLOBAL_ROTATOR
-    if _GLOBAL_ROTATOR is None:
-        keys = _load_keys()
+def get_rotator(provider: Optional[str] = None) -> _KeyRotator:
+    p = provider or _provider()
+    if p not in _ROTATORS:
+        keys = _load_keys(p)
         if not keys:
+            env_hint = "OPENAI_API_KEY(S)" if p == "openai" else "DASHSCOPE_API_KEY(S)"
             raise RuntimeError(
-                "No DashScope keys found. Set DASHSCOPE_API_KEYS (comma-separated) or DASHSCOPE_API_KEY."
+                f"No {p} keys found. Set {env_hint} (comma-separated) in your environment or .env."
             )
-        _GLOBAL_ROTATOR = _KeyRotator(keys)
-    return _GLOBAL_ROTATOR
+        _ROTATORS[p] = _KeyRotator(keys)
+    return _ROTATORS[p]
 
 
 class _MockMessage:
@@ -88,9 +116,11 @@ class _MockMessage:
 
 
 class DashScopeWrapper:
-    """OpenAI-compatible DashScope client with key rotation."""
+    """OpenAI-compatible LLM client. Auto-selects DashScope or OpenAI based on LLM_PROVIDER."""
 
-    DEFAULT_MODEL = os.environ.get("DASHSCOPE_DEFAULT_MODEL", "qwen-plus")
+    @property
+    def DEFAULT_MODEL(self) -> str:
+        return _provider_default_model(self.provider)
 
     def __init__(
         self,
@@ -98,12 +128,15 @@ class DashScopeWrapper:
         role: str = "generic",
         max_tokens: int = 512,
         timeout: float = 60.0,
+        provider: Optional[str] = None,
     ):
-        self.model = model or self.DEFAULT_MODEL
+        self.provider = (provider or _provider()).strip().lower()
+        self.model = model or _provider_default_model(self.provider)
         self.role = role
         self.max_tokens = max_tokens
         self.timeout = timeout
-        self.rotator = get_rotator()
+        self.base_url = _provider_base_url(self.provider)
+        self.rotator = get_rotator(self.provider)
         self.call_count = 0
         self.fail_count = 0
 
@@ -114,39 +147,37 @@ class DashScopeWrapper:
         max_t = max_tokens if max_tokens is not None else self.max_tokens
 
         # Qwen3 thinking-series baselines (qwen3-*, qwq-*) require
-        # `enable_thinking: false` for non-streaming calls. Always send it; for
-        # non-thinking baselines DashScope ignores the extra field.
-        extra_body = {"enable_thinking": False}
+        # `enable_thinking: false` for non-streaming calls. Only attach for DashScope.
+        extra_body = {"enable_thinking": False} if self.provider == "dashscope" else None
 
-        # Try each key once on transient failure (so we can recover from a single
-        # bad key without aborting the call).
         last_err: Optional[Exception] = None
         for attempt in range(len(self.rotator)):
             key = self.rotator.next()
-            client = OpenAI(api_key=key, base_url=DASHSCOPE_BASE_URL, timeout=self.timeout)
+            client = OpenAI(api_key=key, base_url=self.base_url, timeout=self.timeout)
             try:
                 self.call_count += 1
-                resp = client.chat.completions.create(
+                kwargs_create = dict(
                     model=self.model,
                     messages=api_messages,
                     temperature=temperature,
                     max_tokens=max_t,
                     stream=False,
-                    extra_body=extra_body,
                 )
+                if extra_body is not None:
+                    kwargs_create["extra_body"] = extra_body
+                resp = client.chat.completions.create(**kwargs_create)
                 content = resp.choices[0].message.content or ""
                 return _MockMessage(content)
             except Exception as e:
                 self.fail_count += 1
                 last_err = e
-                # On rate limit or auth error, rotate to next key and retry
                 msg = str(e).lower()
                 if any(m in msg for m in ("rate", "limit", "401", "403", "quota")):
                     continue
-                # Other errors: re-raise immediately
                 break
-        # All retries exhausted
-        raise RuntimeError(f"DashScope call failed after {len(self.rotator)} key attempts: {last_err}")
+        raise RuntimeError(
+            f"{self.provider} call failed after {len(self.rotator)} key attempts: {last_err}"
+        )
 
     def cleanup(self) -> None:
         pass
@@ -174,22 +205,8 @@ class DashScopeWrapper:
                 content = str(m)
                 role = "user"
             out.append({"role": role, "content": content})
-
-        if not any(msg["role"] == "system" for msg in out):
-            out.insert(
-                0,
-                {
-                    "role": "system",
-                    "content": "You are a helpful assistant specializing in negotiation and communication.",
-                },
-            )
         return out
 
-    def stats(self) -> dict:
-        return {
-            "role": self.role,
-            "model": self.model,
-            "keys": len(self.rotator),
-            "calls": self.call_count,
-            "failures": self.fail_count,
-        }
+
+# Public aliases for clarity in user code
+LLMClient = DashScopeWrapper

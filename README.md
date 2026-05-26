@@ -10,26 +10,20 @@ judge.
 
 ---
 
+## News
+
+- 🎉 **EmoDistill code released** (IQL emotion selector + LoRA-SFT expression imitation + JPO refinement).
+- 🛠 **OpenAI and DashScope both supported** out of the box — flip via `LLM_PROVIDER` in `.env`.
+- 🚧 **Pretrained 7B fine-tuned creditor checkpoint coming soon.**
+
+---
+
 ## Workflow
 
-```mermaid
-flowchart LR
-    A[Offline sweep<br/>LLM vs LLM<br/>28-emotion rollouts] --> B[Per-turn<br/>LLM judge<br/>1-10 score]
-    B --> C[IQL<br/>emotion selector]
-    B --> D[LoRA-SFT<br/>expression imitation<br/>top-K filtered]
-    C --> E[Hierarchical agent]
-    D --> F[JPO refinement<br/>PPO-clipped + KL<br/>per-turn judge advantage]
-    F --> E
-    E --> G[Deployed 7B<br/>negotiation agent]
-    style A fill:#e8f4f8
-    style B fill:#fef3e2
-    style C fill:#e6f4ea
-    style D fill:#e6f4ea
-    style F fill:#fde6e6
-    style G fill:#fff0d0
-```
+![EmoDistill workflow](figs/workflow.png)
 
 Three trained components compose at inference:
+
 1. **IQL** picks an emotion from a fixed 28-emotion vocabulary at each turn.
 2. **LoRA-SFT** learns to *express* high-quality emotion-conditioned utterances by imitation on top-K advantage-filtered offline turns.
 3. **JPO (Judge Policy Optimization)** further refines the LoRA adapter with a PPO-clipped surrogate against a per-turn LLM judge, anchored by KL to the SFT init.
@@ -41,15 +35,29 @@ Three trained components compose at inference:
 ```bash
 pip install -r requirements.txt
 cp .env.template .env
-# fill in DASHSCOPE_API_KEYS in .env
+# fill in DASHSCOPE_API_KEYS  (or OPENAI_API_KEY if LLM_PROVIDER=openai)
 ```
 
 Tested on Python 3.10, PyTorch 2.4, peft 0.12, transformers 4.44.
 
-## Hardware
+## LLM provider
 
-A single NVIDIA RTX 4090 (24 GB) is sufficient for end-to-end training.
-The counterparty LLM (and per-turn judge) is API-served via DashScope.
+Both DashScope (Qwen-Plus) and OpenAI (gpt-4o, gpt-4o-mini, …) are supported
+via the same OpenAI-compatible API surface. Pick one in `.env`:
+
+```env
+LLM_PROVIDER=dashscope          # or: openai
+DASHSCOPE_API_KEYS=sk-...
+DASHSCOPE_DEFAULT_MODEL=qwen-plus
+# --- alternatively ---
+# LLM_PROVIDER=openai
+# OPENAI_API_KEY=sk-proj-...
+# OPENAI_DEFAULT_MODEL=gpt-4o-mini
+```
+
+All downstream code (sweep generation, judge, evaluation) picks up the choice
+through `EmoDistill.dashscope_wrapper.DashScopeWrapper` (also exported as
+`LLMClient`). No CLI flags need to change.
 
 ## Datasets
 
@@ -81,7 +89,6 @@ python -m experiments.run_random_emotion_sweep \
     --dataset_type debt \
     --scenarios 20 --offset 80 --iterations 3 \
     --max_dialog_len 30 \
-    --model_creditor qwen-plus --model_debtor qwen-plus \
     --concurrency 6 --seed 42 \
     --out_dir results/sweep
 ```
@@ -93,7 +100,7 @@ Score each focal-agent utterance on a 1–10 rubric. This is the reward signal.
 python -m EmoDistill.judge_scorer_v2 \
     --in_json  results/sweep/<run>/random_sweep_*.json \
     --out_json results/sweep/<run>/random_sweep_judged.json \
-    --judge_model qwen-plus --concurrency 6
+    --concurrency 6
 ```
 
 ### Stage C — Train IQL → LoRA-SFT → JPO
@@ -138,7 +145,7 @@ python -m experiments.run_grpo_train \
 ```
 
 ### Stage D — Evaluation
-20 held-out scenarios against an LLM counterparty.
+Held-out scenarios against an LLM counterparty.
 
 ```bash
 python -m experiments.run_hierarchical_eval \
@@ -147,7 +154,6 @@ python -m experiments.run_hierarchical_eval \
     --base_model Qwen/Qwen2.5-7B-Instruct \
     --dataset_type debt \
     --scenarios 20 --iterations 1 --offset 80 \
-    --debtor_model qwen-plus \
     --max_dialog_len 30 --concurrency 4 \
     --seed 42 \
     --out_dir results/eval
@@ -160,16 +166,11 @@ per-episode breakdown.
 
 ## Released artifacts
 
-This repo releases the **training, inference, and evaluation code** for the
-three components:
-
 - ✅ IQL emotion selector
 - ✅ LoRA-SFT expression-imitation trainer
 - ✅ JPO (judge-PPO) refinement trainer
 - ✅ Evaluation harness against an API-served LLM counterparty
 - 🚧 **Pretrained 7B fine-tuned creditor checkpoint** — coming soon
-
----
 
 ## Repo layout
 
@@ -178,8 +179,10 @@ three components:
 ├── README.md
 ├── requirements.txt
 ├── .env.template
-├── data/                        # Example scenario CSV
-├── EmoDistill/                  # Method library (IQL, SFT, JPO, judge)
+├── figs/
+│   └── workflow.png             # method overview
+├── data/
+├── EmoDistill/                  # Method library (IQL, SFT, JPO, judge, LLM client)
 ├── baselines/                   # Vanilla / Q-learning / evolutionary baselines
 ├── experiments/                 # Entry-point scripts
 │   ├── run_random_emotion_sweep.py
