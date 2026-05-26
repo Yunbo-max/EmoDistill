@@ -51,6 +51,24 @@ Tested on Python 3.10, PyTorch 2.4, peft 0.12, transformers 4.44.
 A single NVIDIA RTX 4090 (24 GB) is sufficient for end-to-end training.
 The counterparty LLM (and per-turn judge) is API-served via DashScope.
 
+## Datasets
+
+The four negotiation scenario domains used to train and evaluate EmoDistill
+are released by our companion repo:
+
+- **CRAD** — debt collection (`credit_recovery_scenarios.csv`)
+- **Disaster** — rescue triage (`disaster_survivor_scenarios.csv`)
+- **Hospital** — surgery scheduling (`hospital_surgery_scenarios.csv`)
+- **Student** — sleep deprivation counseling (`education_sleep_scenarios.csv`)
+
+Full CSVs (100 scenarios each) and the prompt templates that turn each row
+into a negotiation instance live at
+👉 **https://github.com/Yunbo-max/EmoMAS**.
+
+This repo bundles only the CRAD CSV as an end-to-end example. To train on the
+other three domains, drop the corresponding CSV from EmoMAS into `data/` and
+pass `--dataset_type {disaster|medical|student}` to the entry-point scripts.
+
 ---
 
 ## End-to-end usage
